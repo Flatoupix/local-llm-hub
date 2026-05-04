@@ -20,7 +20,7 @@ Local Model Hub est un petit repo pour:
 ## Installation
 
 ```bash
-cd /Users/pierrenowak/Desktop/projets/sandbox/local-model-hub
+cd path/to/local-model-hub
 ./setup.sh
 ./install.sh
 ```
@@ -164,4 +164,3 @@ modelhub continue sync
 ```
 
 Si un port est deja pris, change le `port` de l'entree concernee dans `models.json`.
-
