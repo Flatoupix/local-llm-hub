@@ -7,15 +7,19 @@ import os
 import shutil
 import subprocess
 import sys
+import signal
+import tempfile
+import time
 from pathlib import Path
-from textwrap import indent
+from typing import Iterable
+import urllib.request
 
 
 ROOT = Path(__file__).resolve().parent
 MANIFEST = ROOT / "models.json"
 CONTINUE_CONFIG = Path.home() / ".continue" / "config.yaml"
 LOCAL_BIN = Path.home() / ".local" / "bin"
-KNOWN_COMMANDS = {"install", "list", "serve", "continue", "help", "-h", "--help"}
+KNOWN_COMMANDS = {"install", "list", "serve", "up", "continue", "help", "-h", "--help"}
 
 
 def load_manifest() -> dict:
@@ -28,15 +32,15 @@ def models_by_id() -> dict[str, dict]:
     return {model["id"]: model for model in data["models"]}
 
 
+def profiles() -> dict[str, list[str]]:
+    return load_manifest().get("profiles", {})
+
+
 def get_model(model_id: str) -> dict:
     models = models_by_id()
     if model_id not in models:
         raise SystemExit(f"Unknown model '{model_id}'. Available: {', '.join(sorted(models))}")
     return models[model_id]
-
-
-def shell(cmd: list[str]) -> None:
-    raise SystemExit(subprocess.call(cmd))
 
 
 def ensure_llama_server() -> str:
@@ -48,12 +52,22 @@ def ensure_llama_server() -> str:
 
 def install_links() -> None:
     LOCAL_BIN.mkdir(parents=True, exist_ok=True)
-    for name in ("modelhub", "gemma4", "qwen3"):
+    legacy_names = ["qwen-local"]
+    for name in legacy_names:
+        target = LOCAL_BIN / name
+        if target.exists() or target.is_symlink():
+            target.unlink()
+    link_names = ["modelhub", *models_by_id().keys()]
+    seen: set[str] = set()
+    for name in link_names:
+        if name in seen:
+            continue
+        seen.add(name)
         target = LOCAL_BIN / name
         if target.exists() or target.is_symlink():
             target.unlink()
         target.symlink_to(ROOT / "modelhub")
-    print(f"Installed modelhub, gemma4, qwen3 in {LOCAL_BIN}")
+    print(f"Installed modelhub and model shortcuts in {LOCAL_BIN}")
     if f":{LOCAL_BIN}:" not in f":{os.environ.get('PATH', '')}:":
         print(f"Add {LOCAL_BIN} to PATH if needed.")
 
@@ -86,9 +100,112 @@ def serve_model(model_id: str, extra_args: list[str]) -> None:
     host = os.environ.get("MODELHUB_HOST", load_manifest().get("default_host", "127.0.0.1"))
     port = os.environ.get("MODELHUB_PORT", str(model["port"]))
     cmd = [llama_server, "-hf", model["hf_repo"], "--host", host, "--port", port]
+    cmd.extend(model.get("server_args", []))
     cmd.extend(extra_args)
     print(f"Serving {model['label']} on http://{host}:{port}", file=sys.stderr)
     os.execvp(cmd[0], cmd)
+
+
+def port_url(model: dict) -> str:
+    host = os.environ.get("MODELHUB_HOST", load_manifest().get("default_host", "127.0.0.1"))
+    return f"http://{host}:{model['port']}"
+
+
+def ping_model(model: dict, proc: subprocess.Popen[str], timeout_seconds: int = 600) -> None:
+    models_url = f"{port_url(model)}/v1/models"
+    deadline = time.time() + timeout_seconds
+    while time.time() < deadline:
+        if proc.poll() is not None:
+            raise SystemExit(f"{model['id']} exited early. Check the log for details.")
+        try:
+            with urllib.request.urlopen(models_url, timeout=5) as response:
+                payload = json.load(response)
+            if payload.get("data"):
+                return
+        except Exception:
+            pass
+        time.sleep(1)
+    raise SystemExit(f"Timed out waiting for {models_url}")
+
+
+def resolve_selection(selection: str | None) -> list[str]:
+    data = load_manifest()
+    model_ids = list(models_by_id().keys())
+    selected = selection or "all"
+    if selected in profiles():
+        return profiles()[selected]
+    if selected == "all":
+        return model_ids
+    if selected in model_ids:
+        return [selected]
+    raise SystemExit(
+        f"Unknown profile or model '{selected}'. Available profiles: {', '.join(sorted(profiles()))}"
+    )
+
+
+def start_many(model_ids: Iterable[str], wait: bool = True) -> int:
+    data = models_by_id()
+    processes: list[tuple[str, subprocess.Popen[str], Path]] = []
+    log_handles: list[object] = []
+    log_dir = Path(tempfile.gettempdir()) / "local-model-hub"
+    log_dir.mkdir(parents=True, exist_ok=True)
+
+    def cleanup(*_args: object) -> None:
+        for _model_id, proc, _log_file in processes:
+            if proc.poll() is None:
+                proc.terminate()
+        for _model_id, proc, _log_file in processes:
+            try:
+                proc.wait(timeout=10)
+            except Exception:
+                if proc.poll() is None:
+                    proc.kill()
+
+    signal.signal(signal.SIGINT, cleanup)
+    signal.signal(signal.SIGTERM, cleanup)
+
+    try:
+        for model_id in model_ids:
+            model = data[model_id]
+            log_file = log_dir / f"{model_id}.log"
+            cmd = [
+                ensure_llama_server(),
+                "-hf",
+                model["hf_repo"],
+                "--host",
+                os.environ.get("MODELHUB_HOST", load_manifest().get("default_host", "127.0.0.1")),
+                "--port",
+                str(model["port"]),
+            ]
+            cmd.extend(model.get("server_args", []))
+            handle = log_file.open("a", encoding="utf-8")
+            log_handles.append(handle)
+            proc = subprocess.Popen(cmd, stdout=handle, stderr=handle, text=True)
+            processes.append((model_id, proc, log_file))
+            print(f"Starting {model['label']} on {port_url(model)} (log: {log_file})")
+
+        for model_id, proc, log_file in processes:
+            ping_model(data[model_id], proc)
+            print(f"Ready: {model_id}")
+
+        if not wait:
+            return 0
+
+        print("All selected servers are running. Press Ctrl-C to stop them.")
+        while True:
+            if any(proc.poll() is not None for _model_id, proc, _log_file in processes):
+                break
+            time.sleep(1)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        cleanup()
+        for handle in log_handles:
+            try:
+                handle.close()
+            except Exception:
+                pass
+    return 0
 
 
 def continue_model_entry(model: dict) -> str:
@@ -131,6 +248,12 @@ def print_models() -> None:
         print(f"{model['id']:8} {model['label']:24} {model['hf_repo']}:{model['port']}")
 
 
+def print_profiles() -> None:
+    data = profiles()
+    for name, model_ids in sorted(data.items()):
+        print(f"{name:8} {', '.join(model_ids)}")
+
+
 def command_continue(args: argparse.Namespace) -> None:
     if args.subcommand == "sync":
         target = Path(args.path) if args.path else CONTINUE_CONFIG
@@ -156,10 +279,14 @@ def main(argv: list[str]) -> None:
     sub.add_parser("install")
     sub.add_parser("setup")
     sub.add_parser("list")
+    sub.add_parser("profiles")
 
     serve_parser = sub.add_parser("serve")
     serve_parser.add_argument("model", nargs="?")
     serve_parser.add_argument("extra", nargs=argparse.REMAINDER)
+
+    up_parser = sub.add_parser("up")
+    up_parser.add_argument("selection", nargs="?")
 
     cont = sub.add_parser("continue")
     cont_sub = cont.add_subparsers(dest="subcommand")
@@ -186,11 +313,17 @@ def main(argv: list[str]) -> None:
         setup_dependencies()
     elif args.cmd == "list":
         print_models()
+    elif args.cmd == "profiles":
+        print_profiles()
     elif args.cmd == "serve":
         model_id = args.model or argv0_model
         if not model_id:
             raise SystemExit("Usage: modelhub serve <model>")
         serve_model(model_id, args.extra)
+    elif args.cmd == "up":
+        selection = args.selection or "all"
+        model_ids = resolve_selection(selection)
+        raise SystemExit(start_many(model_ids))
     elif args.cmd == "continue":
         command_continue(args)
     else:
@@ -199,4 +332,3 @@ def main(argv: list[str]) -> None:
 
 if __name__ == "__main__":
     main(sys.argv)
-

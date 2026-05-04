@@ -13,6 +13,16 @@
       "system_message": "Tu réponds en français, de manière directe et concise. N'affiche jamais de raisonnement interne ni de balises de pensée."
     },
     {
+      "id": "gemma4-26b",
+      "label": "Gemma 4 26B Local",
+      "provider": "openai",
+      "hf_repo": "ggml-org/gemma-4-26B-A4B-it-GGUF",
+      "port": 8083,
+      "roles": ["chat", "edit", "apply"],
+      "capabilities": ["tool_use"],
+      "system_message": "Tu réponds en français, de manière directe et concise. N'affiche jamais de raisonnement interne ni de balises de pensée."
+    },
+    {
       "id": "qwen3",
       "label": "Qwen 3 Local",
       "provider": "openai",
@@ -21,7 +31,32 @@
       "roles": ["chat", "edit", "apply"],
       "capabilities": ["tool_use"],
       "system_message": "Tu es un assistant de code direct. Réponds brièvement et n'expose pas ton raisonnement interne."
+    },
+    {
+      "id": "qwen3-14b",
+      "label": "Qwen 3 14B Local",
+      "provider": "openai",
+      "hf_repo": "ggml-org/Qwen3-14B-GGUF",
+      "port": 8085,
+      "roles": ["chat", "edit", "apply"],
+      "capabilities": ["tool_use"],
+      "system_message": "Tu es un assistant de code direct. Réponds brièvement et n'expose pas ton raisonnement interne."
+    },
+    {
+      "id": "qwen3-coder",
+      "label": "Qwen 3 Coder Local",
+      "provider": "openai",
+      "hf_repo": "ggml-org/Qwen3-Coder-30B-A3B-Instruct-Q8_0-GGUF",
+      "port": 8084,
+      "roles": ["chat", "edit", "apply"],
+      "capabilities": ["tool_use"],
+      "system_message": "Tu es un assistant de code direct. Réponds brièvement et n'expose pas ton raisonnement interne."
     }
-  ]
+  ],
+  "profiles": {
+    "all": ["gemma4", "qwen3", "gemma4-26b", "qwen3-14b", "qwen3-coder"],
+    "daily": ["gemma4", "qwen3"],
+    "heavy": ["gemma4-26b", "qwen3-14b", "qwen3-coder"],
+    "code": ["qwen3", "qwen3-14b", "qwen3-coder"]
+  }
 }
-
