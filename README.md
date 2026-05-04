@@ -19,14 +19,26 @@ Local Model Hub est un petit repo pour:
 
 ## Installation
 
+### macOS / Linux
+
 ```bash
 cd path/to/local-model-hub
 ./setup.sh
 ./install.sh
 ```
 
-`setup.sh` installe `llama.cpp` via Homebrew si `llama-server` n'est pas encore disponible.  
-`install.sh` crée les raccourcis depuis le manifeste vers `~/.local/bin`.
+### Windows
+
+```powershell
+Set-ExecutionPolicy -Scope Process Bypass
+.\setup.ps1
+.\install.ps1
+```
+
+`modelhub setup` installe `llama.cpp` avec Homebrew, Nix ou Winget selon l'OS disponible.  
+`modelhub install` crée les raccourcis depuis le manifeste vers `~/.local/bin` sur Unix ou des wrappers `.cmd` sur Windows.
+
+Tu as aussi besoin de Python 3 sur Windows pour lancer `modelhub`.
 
 ## Commandes
 
@@ -156,6 +168,8 @@ Si les commandes ne sont pas dans ton shell:
 ```bash
 rehash
 ```
+
+Sous Windows, rouvre simplement le terminal après avoir ajouté `~/.local/bin` au `PATH`.
 
 Si Continue ne voit pas les modeles:
 

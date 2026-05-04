@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import platform
 import shutil
 import subprocess
 import sys
@@ -20,6 +21,7 @@ MANIFEST = ROOT / "models.json"
 CONTINUE_CONFIG = Path.home() / ".continue" / "config.yaml"
 LOCAL_BIN = Path.home() / ".local" / "bin"
 KNOWN_COMMANDS = {"install", "list", "serve", "up", "continue", "help", "-h", "--help"}
+MODELHUB_PYTHON = sys.executable
 
 
 def load_manifest() -> dict:
@@ -50,43 +52,86 @@ def ensure_llama_server() -> str:
     return llama_server
 
 
+def is_windows() -> bool:
+    return platform.system().lower().startswith("win")
+
+
+def launcher_path(name: str) -> Path:
+    if is_windows():
+        return LOCAL_BIN / f"{name}.cmd"
+    return LOCAL_BIN / name
+
+
+def remove_launcher_variants(name: str) -> None:
+    for candidate in {LOCAL_BIN / name, LOCAL_BIN / f"{name}.cmd", LOCAL_BIN / f"{name}.ps1"}:
+        if candidate.exists() or candidate.is_symlink():
+            candidate.unlink()
+
+
+def write_windows_launcher(target: Path, script_path: Path) -> None:
+    content = "\n".join(
+        [
+            "@echo off",
+            "setlocal",
+            f'"{MODELHUB_PYTHON}" "{script_path}" %*',
+            "exit /b %errorlevel%",
+            "",
+        ]
+    )
+    target.write_text(content, encoding="utf-8", newline="\r\n")
+
+
 def install_links() -> None:
     LOCAL_BIN.mkdir(parents=True, exist_ok=True)
     legacy_names = ["qwen-local"]
     for name in legacy_names:
-        target = LOCAL_BIN / name
-        if target.exists() or target.is_symlink():
-            target.unlink()
+        remove_launcher_variants(name)
     link_names = ["modelhub", *models_by_id().keys()]
     seen: set[str] = set()
     for name in link_names:
         if name in seen:
             continue
         seen.add(name)
-        target = LOCAL_BIN / name
-        if target.exists() or target.is_symlink():
-            target.unlink()
-        target.symlink_to(ROOT / "modelhub")
+        remove_launcher_variants(name)
+        target = launcher_path(name)
+        if is_windows():
+            write_windows_launcher(target, ROOT / "modelhub")
+        else:
+            target.symlink_to(ROOT / "modelhub")
     print(f"Installed modelhub and model shortcuts in {LOCAL_BIN}")
     if f":{LOCAL_BIN}:" not in f":{os.environ.get('PATH', '')}:":
         print(f"Add {LOCAL_BIN} to PATH if needed.")
 
 
 def setup_dependencies() -> None:
-    if not shutil.which("brew"):
-        raise SystemExit("Homebrew is required for automatic llama.cpp installation.")
     if not shutil.which("llama-server"):
-        subprocess.check_call(
-            [
-                "bash",
-                "-lc",
-                "HOMEBREW_NO_INSTALL_CLEANUP=1 HOMEBREW_NO_ENV_HINTS=1 brew install llama.cpp",
-            ]
-        )
+        system = platform.system().lower()
+        if system == "darwin" or system == "linux":
+            if shutil.which("brew"):
+                subprocess.check_call(
+                    [
+                        "bash",
+                        "-lc",
+                        "HOMEBREW_NO_INSTALL_CLEANUP=1 HOMEBREW_NO_ENV_HINTS=1 brew install llama.cpp",
+                    ]
+                )
+            elif shutil.which("nix"):
+                subprocess.check_call(["nix", "profile", "install", "nixpkgs#llama-cpp"])
+            else:
+                raise SystemExit(
+                    "Install llama.cpp with Homebrew or Nix, then rerun `modelhub setup`."
+                )
+        elif system.startswith("win"):
+            if shutil.which("winget"):
+                subprocess.check_call(["winget", "install", "llama.cpp"])
+            else:
+                raise SystemExit(
+                    "Install llama.cpp with winget, then rerun `modelhub setup`."
+                )
+        else:
+            raise SystemExit(f"Unsupported platform: {platform.system()}")
     else:
         print("llama-server already installed")
-    if not shutil.which("curl"):
-        raise SystemExit("curl is required to install tools if you later extend this repo.")
 
 
 def infer_invocation_model(argv0: str) -> str | None:
@@ -103,7 +148,7 @@ def serve_model(model_id: str, extra_args: list[str]) -> None:
     cmd.extend(model.get("server_args", []))
     cmd.extend(extra_args)
     print(f"Serving {model['label']} on http://{host}:{port}", file=sys.stderr)
-    os.execvp(cmd[0], cmd)
+    raise SystemExit(subprocess.call(cmd))
 
 
 def port_url(model: dict) -> str:
