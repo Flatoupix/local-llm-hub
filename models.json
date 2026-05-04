@@ -1,0 +1,27 @@
+{
+  "name": "Local Model Hub",
+  "default_host": "127.0.0.1",
+  "models": [
+    {
+      "id": "gemma4",
+      "label": "Gemma 4 Local",
+      "provider": "openai",
+      "hf_repo": "ggml-org/gemma-4-E4B-it-GGUF",
+      "port": 8081,
+      "roles": ["chat", "edit", "apply"],
+      "capabilities": ["tool_use"],
+      "system_message": "Tu réponds en français, de manière directe et concise. N'affiche jamais de raisonnement interne ni de balises de pensée."
+    },
+    {
+      "id": "qwen3",
+      "label": "Qwen 3 Local",
+      "provider": "openai",
+      "hf_repo": "ggml-org/Qwen3-4B-Instruct-2507-Q8_0-GGUF",
+      "port": 8082,
+      "roles": ["chat", "edit", "apply"],
+      "capabilities": ["tool_use"],
+      "system_message": "Tu es un assistant de code direct. Réponds brièvement et n'expose pas ton raisonnement interne."
+    }
+  ]
+}
+

@@ -1,0 +1,202 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import shutil
+import subprocess
+import sys
+from pathlib import Path
+from textwrap import indent
+
+
+ROOT = Path(__file__).resolve().parent
+MANIFEST = ROOT / "models.json"
+CONTINUE_CONFIG = Path.home() / ".continue" / "config.yaml"
+LOCAL_BIN = Path.home() / ".local" / "bin"
+KNOWN_COMMANDS = {"install", "list", "serve", "continue", "help", "-h", "--help"}
+
+
+def load_manifest() -> dict:
+    with MANIFEST.open("r", encoding="utf-8") as handle:
+        return json.load(handle)
+
+
+def models_by_id() -> dict[str, dict]:
+    data = load_manifest()
+    return {model["id"]: model for model in data["models"]}
+
+
+def get_model(model_id: str) -> dict:
+    models = models_by_id()
+    if model_id not in models:
+        raise SystemExit(f"Unknown model '{model_id}'. Available: {', '.join(sorted(models))}")
+    return models[model_id]
+
+
+def shell(cmd: list[str]) -> None:
+    raise SystemExit(subprocess.call(cmd))
+
+
+def ensure_llama_server() -> str:
+    llama_server = shutil.which("llama-server")
+    if not llama_server:
+        raise SystemExit("llama-server is not installed. Run `modelhub setup` first.")
+    return llama_server
+
+
+def install_links() -> None:
+    LOCAL_BIN.mkdir(parents=True, exist_ok=True)
+    for name in ("modelhub", "gemma4", "qwen3"):
+        target = LOCAL_BIN / name
+        if target.exists() or target.is_symlink():
+            target.unlink()
+        target.symlink_to(ROOT / "modelhub")
+    print(f"Installed modelhub, gemma4, qwen3 in {LOCAL_BIN}")
+    if f":{LOCAL_BIN}:" not in f":{os.environ.get('PATH', '')}:":
+        print(f"Add {LOCAL_BIN} to PATH if needed.")
+
+
+def setup_dependencies() -> None:
+    if not shutil.which("brew"):
+        raise SystemExit("Homebrew is required for automatic llama.cpp installation.")
+    if not shutil.which("llama-server"):
+        subprocess.check_call(
+            [
+                "bash",
+                "-lc",
+                "HOMEBREW_NO_INSTALL_CLEANUP=1 HOMEBREW_NO_ENV_HINTS=1 brew install llama.cpp",
+            ]
+        )
+    else:
+        print("llama-server already installed")
+    if not shutil.which("curl"):
+        raise SystemExit("curl is required to install tools if you later extend this repo.")
+
+
+def infer_invocation_model(argv0: str) -> str | None:
+    name = Path(argv0).stem
+    return name if name in models_by_id() else None
+
+
+def serve_model(model_id: str, extra_args: list[str]) -> None:
+    model = get_model(model_id)
+    llama_server = ensure_llama_server()
+    host = os.environ.get("MODELHUB_HOST", load_manifest().get("default_host", "127.0.0.1"))
+    port = os.environ.get("MODELHUB_PORT", str(model["port"]))
+    cmd = [llama_server, "-hf", model["hf_repo"], "--host", host, "--port", port]
+    cmd.extend(extra_args)
+    print(f"Serving {model['label']} on http://{host}:{port}", file=sys.stderr)
+    os.execvp(cmd[0], cmd)
+
+
+def continue_model_entry(model: dict) -> str:
+    lines = [
+        "  - name: " + model["label"],
+        "    provider: " + model.get("provider", "openai"),
+        "    model: " + model["hf_repo"],
+        f"    apiBase: http://{os.environ.get('MODELHUB_HOST', load_manifest().get('default_host', '127.0.0.1'))}:{model['port']}/v1",
+        "    apiKey: none",
+        "    roles:",
+    ]
+    lines.extend([f"      - {role}" for role in model.get("roles", ["chat", "edit", "apply"])])
+    if model.get("capabilities"):
+        lines.append("    capabilities:")
+        lines.extend([f"      - {cap}" for cap in model["capabilities"]])
+    if model.get("system_message"):
+        lines.append("    systemMessage: |")
+        lines.extend([f"      {line}" for line in model["system_message"].splitlines()])
+    return "\n".join(lines)
+
+
+def write_continue_config(path: Path) -> None:
+    data = load_manifest()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    body = [
+        "name: " + data["name"],
+        "version: 0.0.1",
+        "schema: v1",
+        "",
+        "models:",
+    ]
+    for model in data["models"]:
+        body.append(continue_model_entry(model))
+    path.write_text("\n".join(body) + "\n", encoding="utf-8")
+
+
+def print_models() -> None:
+    data = load_manifest()
+    for model in data["models"]:
+        print(f"{model['id']:8} {model['label']:24} {model['hf_repo']}:{model['port']}")
+
+
+def command_continue(args: argparse.Namespace) -> None:
+    if args.subcommand == "sync":
+        target = Path(args.path) if args.path else CONTINUE_CONFIG
+        write_continue_config(target)
+        print(f"Wrote Continue config to {target}")
+    elif args.subcommand == "print":
+        data = load_manifest()
+        print("name: " + data["name"])
+        print("version: 0.0.1")
+        print("schema: v1")
+        print()
+        print("models:")
+        for model in data["models"]:
+            print(continue_model_entry(model))
+    else:
+        raise SystemExit("Usage: modelhub continue [sync|print]")
+
+
+def main(argv: list[str]) -> None:
+    parser = argparse.ArgumentParser(prog=Path(argv[0]).name, add_help=True)
+    sub = parser.add_subparsers(dest="cmd")
+
+    sub.add_parser("install")
+    sub.add_parser("setup")
+    sub.add_parser("list")
+
+    serve_parser = sub.add_parser("serve")
+    serve_parser.add_argument("model", nargs="?")
+    serve_parser.add_argument("extra", nargs=argparse.REMAINDER)
+
+    cont = sub.add_parser("continue")
+    cont_sub = cont.add_subparsers(dest="subcommand")
+    sync = cont_sub.add_parser("sync")
+    sync.add_argument("path", nargs="?")
+    cont_sub.add_parser("print")
+
+    parser.add_argument("rest", nargs=argparse.REMAINDER)
+
+    argv0_model = infer_invocation_model(argv[0])
+
+    if argv0_model and (len(argv) == 1 or argv[1] == "serve"):
+        extra = argv[2:] if len(argv) > 1 and argv[1] == "serve" else argv[1:]
+        serve_model(argv0_model, extra)
+
+    if argv0_model and len(argv) == 2 and argv[1] not in KNOWN_COMMANDS:
+        serve_model(argv0_model, argv[1:])
+
+    args = parser.parse_args(argv[1:])
+
+    if args.cmd == "install":
+        install_links()
+    elif args.cmd == "setup":
+        setup_dependencies()
+    elif args.cmd == "list":
+        print_models()
+    elif args.cmd == "serve":
+        model_id = args.model or argv0_model
+        if not model_id:
+            raise SystemExit("Usage: modelhub serve <model>")
+        serve_model(model_id, args.extra)
+    elif args.cmd == "continue":
+        command_continue(args)
+    else:
+        parser.print_help()
+
+
+if __name__ == "__main__":
+    main(sys.argv)
+
